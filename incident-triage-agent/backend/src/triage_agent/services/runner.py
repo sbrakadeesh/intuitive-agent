@@ -63,11 +63,16 @@ class TriageRunner:
             incident_id: The incident to run.
         """
         self._queues[incident_id] = asyncio.Queue()
+        logger.info("start_triage: beginning triage for incident=%s", incident_id)
 
         try:
             record = await self._store.get(incident_id)
+            logger.info("start_triage: fetched record for incident=%s", incident_id)
         except ValueError:
             logger.error("start_triage: incident not found: %s", incident_id)
+            return
+        except Exception as exc:
+            logger.error("start_triage: unexpected error fetching incident=%s: %s", incident_id, exc, exc_info=True)
             return
 
         initial_state: TriageState = {
@@ -101,11 +106,48 @@ class TriageRunner:
                 ):
                     await self._handle_event(incident_id, event, graph, config)
 
+                # Check if graph is suspended at an interrupt
+                snapshot = await graph.aget_state(config)
+                logger.info("start_triage: after stream — next=%s", snapshot.next)
+
+                while snapshot.next:
+                    # Graph is interrupted — wait for human decision
+                    current_step = snapshot.values.get("current_step", "")
+                    context_keys = _INTERRUPT_CONTEXT.get(current_step, [])
+                    context_data = {k: snapshot.values.get(k) for k in context_keys}
+
+                    await self._store.set_status(incident_id, "awaiting_approval")
+                    await self._emit(
+                        incident_id, "interrupt", current_step,
+                        {"awaiting": current_step, "context": context_data},
+                    )
+                    logger.info("start_triage: waiting for decision at step=%s", current_step)
+
+                    approval = await self._queues[incident_id].get()
+                    logger.info("start_triage: got decision=%s", approval.decision)
+
+                    await self._store.set_status(incident_id, "running")
+                    await graph.aupdate_state(
+                        config,
+                        {
+                            "human_decision": approval.decision,
+                            "operator_edit": approval.operator_edit,
+                        },
+                    )
+
+                    async for event in graph.astream_events(
+                        Command(resume=approval.decision), config=config, version="v2"
+                    ):
+                        await self._handle_event(incident_id, event, graph, config)
+
+                    snapshot = await graph.aget_state(config)
+                    logger.info("start_triage: after resume — next=%s", snapshot.next)
+
             await self._store.set_status(incident_id, "completed")
             await self._emit(incident_id, "complete", None, {"incident_id": incident_id})
 
         except Exception as exc:
-            logger.error("start_triage: graph run failed for incident=%s: %s", incident_id, exc)
+            logger.error("start_triage: graph run failed for incident=%s: %s", incident_id, exc, exc_info=True)
             await self._store.set_status(incident_id, "failed")
             await self._emit(incident_id, "error", None, {"error": str(exc)})
 
@@ -150,6 +192,8 @@ class TriageRunner:
         """
         kind: str = event.get("event", "")
         name: str = event.get("name", "")
+
+        logger.debug("_handle_event: kind=%s name=%s", kind, name)
 
         if kind == "on_chain_start" and name in _KNOWN_NODES:
             await self._store.update_step(incident_id, name)
@@ -224,16 +268,21 @@ class TriageRunner:
             {"status": "running", "decision": approval.decision},
         )
 
-        # Resume the graph with the operator's decision.
-        resume_value: dict[str, Any] = {
-            "human_decision": approval.decision,
-            "operator_edit":  approval.operator_edit,
-        }
+        # Resume the graph with the operator's decision injected into state,
+        # then re-stream the remaining nodes.
         await graph.aupdate_state(
             config,
-            resume_value,
-            as_node=current_step,
+            {
+                "human_decision": approval.decision,
+                "operator_edit":  approval.operator_edit,
+            },
         )
+        async for ev in graph.astream_events(
+            Command(resume=approval.decision),
+            config=config,
+            version="v2",
+        ):
+            await self._handle_event(incident_id, ev, graph, config)
 
     async def _emit(
         self,

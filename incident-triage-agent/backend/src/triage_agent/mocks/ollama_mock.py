@@ -102,9 +102,10 @@ class MockChatOllama(BaseChatModel):
         run_manager: CallbackManagerForLLMRun | None = None,
         **kwargs: Any,
     ) -> ChatResult:
-        """Return a canned JSON response asynchronously.
+        """Return a canned JSON response asynchronously with a simulated delay.
 
-        Delegates directly to ``_generate`` — no I/O to await.
+        The delay makes the agent run slow enough for the WebSocket to connect
+        and stream each step live in the UI.
 
         Args:
             messages: The conversation messages forwarded by the node.
@@ -116,4 +117,6 @@ class MockChatOllama(BaseChatModel):
             A ``ChatResult`` wrapping a single ``AIMessage`` whose content is
             a JSON-serialised string matching the detected node's schema.
         """
+        import asyncio
+        await asyncio.sleep(1.5)  # simulate LLM thinking time
         return self._generate(messages, stop=stop, run_manager=run_manager, **kwargs)

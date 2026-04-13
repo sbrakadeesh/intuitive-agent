@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { listIncidents } from "../api/incidents";
 import { useIncidentStore } from "../store/incidentStore";
 
@@ -21,7 +21,7 @@ export function useIncidentList() {
 
   useEffect(() => {
     fetchAll();
-    const interval = setInterval(fetchAll, 5_000);
+    const interval = setInterval(fetchAll, 2_000);
     return () => clearInterval(interval);
   }, [fetchAll]);
 

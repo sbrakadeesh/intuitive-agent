@@ -4,34 +4,53 @@ import type { ApprovalMessage, WSEvent } from "../types/events";
 
 export function useIncidentWebSocket(incidentId: string) {
   const wsRef = useRef<WebSocket | null>(null);
+
+
   const appendEvent = useIncidentStore((s) => s.appendEvent);
   const applyEventPatch = useIncidentStore((s) => s.applyEventPatch);
+  const appendEventRef = useRef(appendEvent);
+  const applyEventPatchRef = useRef(applyEventPatch);
+  appendEventRef.current = appendEvent;
+  applyEventPatchRef.current = applyEventPatch;
 
   useEffect(() => {
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const url = `${protocol}//${window.location.host}/ws/incidents/${encodeURIComponent(incidentId)}`;
-    const ws = new WebSocket(url);
-    wsRef.current = ws;
+    let ws: WebSocket;
+    let retryTimer: ReturnType<typeof setTimeout>;
 
-    ws.onmessage = (messageEvent) => {
-      try {
-        const event = JSON.parse(messageEvent.data as string) as WSEvent;
-        appendEvent(incidentId, event);
-        applyEventPatch(event);
-      } catch {
-        console.warn("useIncidentWebSocket: failed to parse message", messageEvent.data);
-      }
-    };
+    function connect() {
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const url = `${protocol}//${window.location.host}/ws/incidents/${encodeURIComponent(incidentId)}`;
+      ws = new WebSocket(url);
+      wsRef.current = ws;
 
-    ws.onerror = (err) => {
-      console.error("useIncidentWebSocket: error for incident", incidentId, err);
-    };
+      ws.onmessage = (messageEvent) => {
+        try {
+          const event = JSON.parse(messageEvent.data as string) as WSEvent;
+          appendEventRef.current(incidentId, event);
+          applyEventPatchRef.current(event);
+        } catch {
+          console.warn("useIncidentWebSocket: failed to parse message", messageEvent.data);
+        }
+      };
+
+      ws.onerror = () => {
+        // Retry after 500ms if connection fails
+        retryTimer = setTimeout(connect, 500);
+      };
+
+      ws.onclose = () => {
+        wsRef.current = null;
+      };
+    }
+
+    connect();
 
     return () => {
-      ws.close();
+      clearTimeout(retryTimer);
+      ws?.close();
       wsRef.current = null;
     };
-  }, [incidentId, appendEvent, applyEventPatch]);
+  }, [incidentId]);
 
   const sendDecision = useCallback((msg: ApprovalMessage) => {
     const ws = wsRef.current;

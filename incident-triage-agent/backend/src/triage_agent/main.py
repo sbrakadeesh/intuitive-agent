@@ -1,8 +1,14 @@
 """FastAPI application entry point."""
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+)
 
 from triage_agent.api.router import build_router
 from triage_agent.api.websocket import ConnectionManager, websocket_handler
