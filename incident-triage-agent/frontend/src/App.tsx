@@ -1,0 +1,7 @@
+export default function App() {
+  return (
+    <div className="min-h-screen bg-gray-950 text-gray-100">
+      <p className="p-4">Incident Triage Agent</p>
+    </div>
+  )
+}
