@@ -6,9 +6,13 @@ from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s — %(message)s",
 )
+# Suppress noisy debug output from internal libraries
+logging.getLogger("aiosqlite").setLevel(logging.WARNING)
+logging.getLogger("langgraph").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 from triage_agent.api.router import build_router
 from triage_agent.api.websocket import ConnectionManager, websocket_handler
