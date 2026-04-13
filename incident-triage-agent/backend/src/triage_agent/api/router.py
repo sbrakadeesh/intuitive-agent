@@ -1,8 +1,9 @@
 """FastAPI router factory — wires HTTP endpoints to the store and runner."""
+import asyncio
 import logging
 from typing import Any, Optional
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from triage_agent.agent.checkpointer import get_checkpointer
@@ -60,19 +61,17 @@ def build_router(store: IncidentStore, runner: TriageRunner) -> APIRouter:
     )
     async def create_incident(
         body: CreateIncidentRequest,
-        background_tasks: BackgroundTasks,
     ) -> IncidentRecord:
         """Create a new incident and immediately kick off background triage.
 
         Args:
             body: The alert payload to triage.
-            background_tasks: FastAPI background task queue.
 
         Returns:
             The newly created ``IncidentRecord`` (status ``"pending"``).
         """
         record = await store.create(body.alert)
-        background_tasks.add_task(runner.start_triage, record.incident_id)
+        asyncio.create_task(runner.start_triage(record.incident_id))
         logger.info("create_incident: started triage for incident=%s", record.incident_id)
         return record
 

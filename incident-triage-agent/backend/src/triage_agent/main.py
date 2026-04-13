@@ -26,6 +26,7 @@ runner = TriageRunner(store=store, ws_manager=ws_manager)
 async def lifespan(app: FastAPI):
     """Initialise resources on startup and clean up on shutdown."""
     await store.init_db()
+    await runner.resume_interrupted()
     yield
     await store.close()
 
@@ -50,4 +51,4 @@ app.include_router(build_router(store, runner))
 @app.websocket("/ws/incidents/{incident_id}")
 async def incidents_ws(websocket: WebSocket, incident_id: str) -> None:
     """WebSocket endpoint for real-time triage event streaming."""
-    await websocket_handler(websocket, incident_id, runner)
+    await websocket_handler(websocket, incident_id, runner, store)

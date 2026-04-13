@@ -108,20 +108,29 @@ class TriageRunner:
 
                 # Check if graph is suspended at an interrupt
                 snapshot = await graph.aget_state(config)
-                logger.info("start_triage: after stream — next=%s", snapshot.next)
+                logger.info(
+                    "start_triage: after stream — next=%s interrupted=%s",
+                    snapshot.next,
+                    bool(snapshot.next),
+                )
 
                 while snapshot.next:
-                    # Graph is interrupted — wait for human decision
-                    current_step = snapshot.values.get("current_step", "")
-                    context_keys = _INTERRUPT_CONTEXT.get(current_step, [])
+                    # Graph is interrupted — wait for human decision.
+                    interrupted_node = snapshot.next[0]
+                    context_keys = _INTERRUPT_CONTEXT.get(interrupted_node, [])
                     context_data = {k: snapshot.values.get(k) for k in context_keys}
+                    logger.info(
+                        "start_triage: interrupted before node=%s context_keys=%s",
+                        interrupted_node,
+                        context_keys,
+                    )
 
                     await self._store.set_status(incident_id, "awaiting_approval")
                     await self._emit(
-                        incident_id, "interrupt", current_step,
-                        {"awaiting": current_step, "context": context_data},
+                        incident_id, "interrupt", interrupted_node,
+                        {"awaiting": interrupted_node, "context": context_data},
                     )
-                    logger.info("start_triage: waiting for decision at step=%s", current_step)
+                    logger.info("start_triage: waiting for decision at step=%s", interrupted_node)
 
                     approval = await self._queues[incident_id].get()
                     logger.info("start_triage: got decision=%s", approval.decision)
@@ -151,6 +160,77 @@ class TriageRunner:
             await self._store.set_status(incident_id, "failed")
             await self._emit(incident_id, "error", None, {"error": str(exc)})
 
+        finally:
+            self._queues.pop(incident_id, None)
+
+    async def resume_interrupted(self) -> None:
+        """On startup, recreate queues for any incidents stuck in awaiting_approval.
+
+        When uvicorn reloads, in-memory asyncio tasks are lost.  This method
+        finds incidents that were paused at a human interrupt and re-enters the
+        waiting loop so operator decisions can be submitted again.
+        """
+        try:
+            records = await self._store.list(status="awaiting_approval", limit=200)
+            for record in records:
+                incident_id = record.incident_id
+                if incident_id in self._queues:
+                    continue
+                logger.info("resume_interrupted: re-attaching queue for incident=%s", incident_id)
+                self._queues[incident_id] = asyncio.Queue()
+                asyncio.create_task(self._wait_for_decision(incident_id))
+        except Exception as exc:
+            logger.error("resume_interrupted: failed: %s", exc, exc_info=True)
+
+    async def _wait_for_decision(self, incident_id: str) -> None:
+        """Wait for an operator decision and resume the graph from checkpoint."""
+        try:
+            async with get_checkpointer() as checkpointer:
+                graph = build_graph(checkpointer)
+                config = {"configurable": {"thread_id": incident_id}}
+
+                while True:
+                    snapshot = await graph.aget_state(config)
+                    if not snapshot.next:
+                        logger.info("_wait_for_decision: no interrupt found for incident=%s", incident_id)
+                        break
+
+                    interrupted_node = snapshot.next[0]
+                    context_keys = _INTERRUPT_CONTEXT.get(interrupted_node, [])
+                    context_data = {k: snapshot.values.get(k) for k in context_keys}
+
+                    await self._store.set_status(incident_id, "awaiting_approval")
+                    await self._emit(incident_id, "interrupt", interrupted_node,
+                                     {"awaiting": interrupted_node, "context": context_data})
+                    logger.info("_wait_for_decision: waiting for decision incident=%s step=%s",
+                                incident_id, interrupted_node)
+
+                    approval: ApprovalMessage = await self._queues[incident_id].get()
+                    logger.info("_wait_for_decision: got decision=%s incident=%s",
+                                approval.decision, incident_id)
+
+                    await self._store.set_status(incident_id, "running")
+                    await graph.aupdate_state(config, {
+                        "human_decision": approval.decision,
+                        "operator_edit": approval.operator_edit,
+                    })
+
+                    async for event in graph.astream_events(
+                        Command(resume=approval.decision), config=config, version="v2"
+                    ):
+                        await self._handle_event(incident_id, event, graph, config)
+
+                    snapshot = await graph.aget_state(config)
+                    if not snapshot.next:
+                        break
+
+            await self._store.set_status(incident_id, "completed")
+            await self._emit(incident_id, "complete", None, {"incident_id": incident_id})
+
+        except Exception as exc:
+            logger.error("_wait_for_decision: failed incident=%s: %s", incident_id, exc, exc_info=True)
+            await self._store.set_status(incident_id, "failed")
+            await self._emit(incident_id, "error", None, {"error": str(exc)})
         finally:
             self._queues.pop(incident_id, None)
 
@@ -243,14 +323,15 @@ class TriageRunner:
         snapshot = await graph.aget_state(config)
         state: TriageState = snapshot.values
 
-        current_step: str = state.get("current_step", "")
-        context_keys = _INTERRUPT_CONTEXT.get(current_step, [])
+        # snapshot.next[0] is the node about to run (interrupt_before).
+        interrupted_node: str = snapshot.next[0] if snapshot.next else state.get("current_step", "")
+        context_keys = _INTERRUPT_CONTEXT.get(interrupted_node, [])
         context_data: dict[str, Any] = {k: state.get(k) for k in context_keys}
 
         await self._store.set_status(incident_id, "awaiting_approval")
         await self._emit(
-            incident_id, "interrupt", current_step,
-            {"awaiting": current_step, "context": context_data},
+            incident_id, "interrupt", interrupted_node,
+            {"awaiting": interrupted_node, "context": context_data},
         )
 
         # Block until the operator submits a decision.
@@ -259,12 +340,12 @@ class TriageRunner:
 
         logger.info(
             "_handle_interrupt: incident=%s step=%s decision=%s",
-            incident_id, current_step, approval.decision,
+            incident_id, interrupted_node, approval.decision,
         )
 
         await self._store.set_status(incident_id, "running")
         await self._emit(
-            incident_id, "status_update", current_step,
+            incident_id, "status_update", interrupted_node,
             {"status": "running", "decision": approval.decision},
         )
 

@@ -398,7 +398,7 @@ async def verify_resolution(state: TriageState) -> dict[str, Any]:
 
     try:
         fresh_metrics = await asyncio.to_thread(
-            _get_metrics_service().get_metrics, service
+            _get_metrics_service().fetch_metrics, service
         )
     except Exception as exc:
         logger.warning("verify_resolution: metrics re-fetch failed: %s", exc)

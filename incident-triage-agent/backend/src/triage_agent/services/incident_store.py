@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS incidents (
 
 _UPDATABLE_FIELDS = {
     "root_cause",
+    "root_cause_confidence",
     "proposed_remediation",
     "execution_result",
     "verification_result",

@@ -5,6 +5,14 @@ from typing import Any
 from fastapi import WebSocket, WebSocketDisconnect
 
 from triage_agent.models.events import ApprovalMessage, WSEvent
+from triage_agent.services.incident_store import IncidentStore
+
+# Maps the last-completed node to the interrupted (next) node name.
+_NEXT_NODE: dict[str, str] = {
+    "analyze_root_cause": "propose_remediation",
+    "propose_remediation": "execute_remediation",
+    "verify_resolution": "end_review",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -78,19 +86,59 @@ async def websocket_handler(
     websocket: WebSocket,
     incident_id: str,
     runner: Any,
+    store: IncidentStore,
 ) -> None:
     """Handle the full lifecycle of a single WebSocket client connection.
 
-    Connects the client, then loops receiving operator decisions and
+    Connects the client, replays a synthetic interrupt event if the incident
+    is already awaiting approval, then loops receiving operator decisions and
     forwarding them to the graph runner.  Cleans up on disconnect.
 
     Args:
         websocket: The WebSocket connection from the FastAPI route.
         incident_id: The incident this client is interacting with.
         runner: A graph runner instance that exposes ``submit_decision``.
+        store: The incident store used to replay state on reconnect.
     """
     await manager.connect(incident_id, websocket)
     try:
+        # If the graph is already paused at an interrupt, the client missed
+        # the original broadcast.  Replay a synthetic interrupt event so the
+        # ApprovalPanel renders immediately on connect / reconnect.
+        try:
+            record = await store.get(incident_id)
+            if record.status == "awaiting_approval" and record.current_step:
+                interrupted_node = _NEXT_NODE.get(record.current_step)
+                if interrupted_node:
+                    context: dict[str, Any] = {}
+                    if interrupted_node == "propose_remediation":
+                        context = {
+                            "root_cause": record.root_cause,
+                            "root_cause_confidence": record.root_cause_confidence,
+                        }
+                    elif interrupted_node == "execute_remediation":
+                        context = {"proposed_remediation": record.proposed_remediation}
+                    elif interrupted_node == "end_review":
+                        context = {"verification_result": record.verification_result}
+                    replay = WSEvent(
+                        event_type="interrupt",
+                        incident_id=incident_id,
+                        step_name=interrupted_node,
+                        data={"awaiting": interrupted_node, "context": context},
+                    )
+                    await websocket.send_text(replay.model_dump_json())
+                    logger.info(
+                        "websocket_handler: replayed interrupt event for incident=%s step=%s",
+                        incident_id,
+                        interrupted_node,
+                    )
+        except Exception as exc:
+            logger.warning(
+                "websocket_handler: could not replay interrupt for incident=%s: %s",
+                incident_id,
+                exc,
+            )
+
         while True:
             raw = await websocket.receive_text()
             try:
@@ -103,4 +151,8 @@ async def websocket_handler(
                     exc,
                 )
     except WebSocketDisconnect:
+        logger.info("websocket_handler: client disconnected incident=%s", incident_id)
+        manager.disconnect(incident_id, websocket)
+    except Exception as exc:
+        logger.error("websocket_handler: unexpected error incident=%s: %s", incident_id, exc, exc_info=True)
         manager.disconnect(incident_id, websocket)
