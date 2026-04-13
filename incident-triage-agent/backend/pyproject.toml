@@ -18,6 +18,7 @@ dependencies = [
     "pydantic-settings>=2.0",
     "aiosqlite>=0.20.0",
     "aiofiles>=23.2.1",
+    "langgraph-checkpoint-sqlite>=3.0.3",
 ]
 
 [project.optional-dependencies]
@@ -41,3 +42,9 @@ src = ["src"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
