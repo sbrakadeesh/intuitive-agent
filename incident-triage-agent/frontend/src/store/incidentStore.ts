@@ -18,8 +18,10 @@ function patchedStatus(event: WSEvent): IncidentStatus | null {
   switch (event.event_type) {
     case "interrupt":
       return "awaiting_approval";
-    case "complete":
-      return "completed";
+    case "complete": {
+      const data = event.data as Record<string, unknown> | null | undefined;
+      return (data?.status as IncidentStatus | undefined) ?? "completed";
+    }
     case "error":
       return "failed";
     default:

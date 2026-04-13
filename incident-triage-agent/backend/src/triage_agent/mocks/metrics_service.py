@@ -89,7 +89,14 @@ class MockMetricsService:
         """
         await asyncio.sleep(0.05)
 
-        scenario = random.choice(list(_SCENARIO_SPECS.keys()))
+        if "payment" in service.lower():
+            scenario = "oom_kill"
+        elif "auth" in service.lower():
+            scenario = "crash_loop"
+        elif "recommendation" in service.lower():
+            scenario = "high_latency"
+        else:
+            scenario = random.choice(list(_SCENARIO_SPECS.keys()))
         specs = _SCENARIO_SPECS[scenario]
 
         now = datetime.now(timezone.utc)

@@ -71,23 +71,41 @@ _VERIFICATION_RESPONSES = {
 
 
 def _detect_scenario(combined: str) -> str:
-    """Pick a scenario key from message content keywords."""
+    """Pick a scenario key from message content keywords.
+
+    Checks crash and latency keywords before OOM to avoid false positives from
+    generic prompt boilerplate (e.g. system prompts containing 'memory').
+    Falls back to 'oom' only when nothing else matches.
+    """
     low = combined.lower()
-    if "oom" in low or "memory" in low or "payment" in low:
-        return "oom"
-    if "crash" in low or "liveness" in low or "auth" in low or "database" in low:
+    # Use specific multi-word or hyphenated terms that only appear in alert
+    # data — avoids matching on metrics JSON "scenario" field values like
+    # "crash_loop", "oom_kill", or "high_latency".
+    if "crashloopbackoff" in low or "liveness probe" in low or "auth-service" in low or "database_url" in low:
         return "crash"
-    if "latency" in low or "recommendation" in low or "pool" in low or "p99" in low:
+    if "high latency" in low or "recommendation-service" in low or "p99 latency" in low or "connection pool" in low or "circuit breaker" in low:
         return "latency"
+    if "oomkill" in low or "oom" in low or "payment-service" in low or "jvm heap" in low:
+        return "oom"
     return "oom"  # default
 
 
 def _pick_response(messages: list[BaseMessage]) -> dict[str, Any]:
+    # Only use the last (human) message for scenario detection — it carries the
+    # actual incident data (title, service, description, logs). System messages
+    # contain generic prompt boilerplate that triggers false keyword matches.
+    incident_text = ""
+    for m in reversed(messages):
+        content = m.content if isinstance(m.content, str) else json.dumps(m.content)
+        if content.strip():
+            incident_text = content
+            break
+
     combined = " ".join(
         m.content if isinstance(m.content, str) else json.dumps(m.content)
         for m in messages
     )
-    scenario = _detect_scenario(combined)
+    scenario = _detect_scenario(incident_text or combined)
 
     if "root_cause" in combined and "confidence" in combined:
         return _ROOT_CAUSE_RESPONSES[scenario]
